@@ -126,7 +126,7 @@ contract ProofOfGraffiti is ReentrancyGuard {
 
         // Calculate tax (2%)
         uint256 taxAmount = (totalCost * TAX_PERCENT) / 10_000;
-        uint256 netCost = totalCost - taxAmount;
+        //uint256 netCost = totalCost - taxAmount;
 
         // Transfer tax to TAX_ADDRESS
         if (taxAmount > 0) {
