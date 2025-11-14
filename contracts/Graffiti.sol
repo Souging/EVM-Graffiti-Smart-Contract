@@ -25,6 +25,10 @@ contract ProofOfGraffiti is ReentrancyGuard {
     uint256 public constant LP_SUPPLY = 20_000_000 * 10**18;     // 20% for LP
     uint256 public constant TOKENS_PER_PACK = 5_000 * 10**18;    // 每张pack 5k代币
     
+    // 税收参数
+    address public constant TAX_ADDRESS = 0x5B38Da6a701c568545dCfcB03FcB875f56beddC4;
+    uint256 public constant TAX_PERCENT = 200; // 2% = 200 basis points
+    
     // 最大张数计算
     uint256 public constant MAX_PACKS = 16_000; // 80,000,000 / 5,000 = 16,000张
     
@@ -75,7 +79,7 @@ contract ProofOfGraffiti is ReentrancyGuard {
     
     // 事件
     event GraffitiCreated(address indexed creator, string name, string symbol, uint256 totalSupply);
-    event GraffitiMinted(address indexed user, uint256 packs, uint256 price, uint256 totalPaid);
+    event GraffitiMinted(address indexed user, uint256 packs, uint256 price, uint256 totalPaid, uint256 taxAmount);
     event TokensSold(address indexed user, uint256 packsSold, uint256 refundAmount);
     event Launched(uint256 tokenAmount, uint256 ethAmount, address lpToken);
     event Refunded(address indexed user, uint256 amount);
@@ -124,6 +128,15 @@ contract ProofOfGraffiti is ReentrancyGuard {
         
         require(msg.value >= totalCost, "Insufficient BNB");
         
+        // 计算税收
+        uint256 taxAmount = totalCost * TAX_PERCENT / 10000;
+        uint256 netCost = totalCost - taxAmount;
+        
+        // 支付税收
+        if (taxAmount > 0) {
+            payable(TAX_ADDRESS).transfer(taxAmount);
+        }
+        
         // 更新用户信息
         UserInfo storage user = users[msg.sender];
         if (user.totalPacks == 0) {
@@ -145,7 +158,7 @@ contract ProofOfGraffiti is ReentrancyGuard {
             payable(msg.sender).transfer(msg.value - totalCost);
         }
         
-        emit GraffitiMinted(msg.sender, packCount, pricePerPack, totalCost);
+        emit GraffitiMinted(msg.sender, packCount, pricePerPack, totalCost, taxAmount);
         
         // 检查是否打满自动发射
         if (totalGraffitiPacks >= MAX_PACKS) {
