@@ -3,296 +3,258 @@ pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 
 interface IUniswapV2Router {
     function addLiquidityETH(
         address token,
-        uint amountTokenDesired,
-        uint amountTokenMin,
-        uint amountETHMin,
+        uint256 amountTokenDesired,
+        uint256 amountTokenMin,
+        uint256 amountETHMin,
         address to,
-        uint deadline
-    ) external payable returns (uint amountToken, uint amountETH, uint liquidity);
+        uint256 deadline
+    ) external payable returns (uint256 amountToken, uint256 amountETH, uint256 liquidity);
 }
 
 contract ProofOfGraffiti is ReentrancyGuard {
-    using SafeMath for uint256;
-    
-    // 代币经济参数
-    uint256 public constant TOTAL_SUPPLY = 100_000_000 * 10**18; // 100M
-    uint256 public constant MINT_SUPPLY = 80_000_000 * 10**18;   // 80% for Graffiti
-    uint256 public constant LP_SUPPLY = 20_000_000 * 10**18;     // 20% for LP
-    uint256 public constant TOKENS_PER_PACK = 5_000 * 10**18;    // 每张pack 5k代币
-    
-    // 税收参数
+    // Token economics
+    uint256 public constant TOTAL_SUPPLY = 100_000_000 * 1e18; // 100M tokens
+    uint256 public constant MINT_SUPPLY = 80_000_000 * 1e18;   // 80% for Graffiti
+    uint256 public constant LP_SUPPLY = 20_000_000 * 1e18;     // 20% for LP
+    uint256 public constant TOKENS_PER_PACK = 5_000 * 1e18;    // 5k tokens per pack
+
+    // Tax (2% of BNB paid)
     address public constant TAX_ADDRESS = 0x5B38Da6a701c568545dCfcB03FcB875f56beddC4;
-    uint256 public constant TAX_PERCENT = 200; // 2% = 200 basis points
-    
-    // 最大张数计算
-    uint256 public constant MAX_PACKS = 16_000; // 80,000,000 / 5,000 = 16,000张
-    
-    // 价格阶梯 (BNB per pack)
+    uint256 public constant TAX_PERCENT = 200; // 2% in basis points
+
+    // Max packs (80M / 5k = 16k)
+    uint256 public constant MAX_PACKS = 16_000;
+
+    // Price tiers (BNB per pack)
     uint256[8] public PRICE_TIERS = [
-        0.001000 ether,    // 10%内: 每张0.001 BNB
-        0.001250 ether,    // 20%内: 每张0.00125 BNB  
-        0.001500 ether,    // 30%内: 每张0.0015 BNB
-        0.001750 ether,    // 40%内: 每张0.00175 BNB
-        0.002000 ether,    // 50%内: 每张0.002 BNB
-        0.002250 ether,    // 60%内: 每张0.00225 BNB
-        0.002500 ether,    // 70%内: 每张0.0025 BNB
-        0.002750 ether     // 80%内: 每张0.00275 BNB
+        0.001000 ether, // 0-10%
+        0.001250 ether, // 10-20%
+        0.001500 ether, // 20-30%
+        0.001750 ether, // 30-40%
+        0.002000 ether, // 40-50%
+        0.002250 ether, // 50-60%
+        0.002500 ether, // 60-70%
+        0.002750 ether  // 70-80%
     ];
-    
-    // 状态变量
+
+    // State variables
     address public tokenAddress;
     address public owner;
-    uint256 public totalGraffitiPacks; // 总Graffiti张数
+    uint256 public totalGraffitiPacks;
     uint256 public contractCreateTime;
     bool public launched;
     bool public graffitiEnded;
     bool public failed;
-    
-    // 失败时记录的数据
+
+    // Failure data
     uint256 public failedTotalPacks;
     uint256 public failedTotalBNB;
     uint256 public failedRefundPerPack;
-    
-    // 反狙击参数
-    uint256 public constant MAX_PACKS_PER_TX = 80; // <0.5% (80张)
-    uint256 public constant MAX_PACKS_PER_BLOCK = 320; // 2% (320张)
+
+    // Anti-bot limits
+    uint256 public constant MAX_PACKS_PER_TX = 80;      // <0.5% (80 packs)
+    uint256 public constant MAX_PACKS_PER_BLOCK = 320; // 2% (320 packs)
     uint256 public lastGraffitiBlock;
     uint256 public currentBlockPacks;
-    
-    // 用户数据结构
+
+    // User data
     struct UserInfo {
-        uint256 totalPacks;           // 总Graffiti张数
-        uint256 totalPaid;            // 总支付金额
-        uint256 soldPacks;            // 已卖出张数
-        uint256 lockedPacks;          // 锁定张数 (60%)
-        uint256 lastGraffitiBlock;    // 最后Graffiti区块
-        bool hasRefunded;             // 是否已退款
+        uint256 totalPacks;       // Total Graffiti packs
+        uint256 totalPaid;        // Total BNB paid
+        uint256 soldPacks;        // Packs sold (40% unlockable)
+        uint256 lockedPacks;      // Locked packs (60%)
+        uint256 lastGraffitiBlock;// Last Graffiti block
+        bool hasRefunded;         // Refund status
     }
-    
+
     mapping(address => UserInfo) public users;
     address[] public graffitiParticipants;
-    
-    // 事件
+
+    // Events
     event GraffitiCreated(address indexed creator, string name, string symbol, uint256 totalSupply);
-    event GraffitiMinted(address indexed user, uint256 packs, uint256 price, uint256 totalPaid, uint256 taxAmount);
+    event GraffitiMinted(address indexed user, uint256 packs, uint256 pricePerPack, uint256 totalPaid, uint256 taxAmount);
     event TokensSold(address indexed user, uint256 packsSold, uint256 refundAmount);
     event Launched(uint256 tokenAmount, uint256 ethAmount, address lpToken);
     event Refunded(address indexed user, uint256 amount);
     event ProjectFailed(uint256 totalPacks, uint256 totalBNB, uint256 refundPerPack);
-    
+
+    // Modifiers
     modifier onlyOwner() {
         require(msg.sender == owner, "Not owner");
         _;
     }
-    
+
     modifier whenNotLaunched() {
         require(!launched, "Already launched");
         _;
     }
-    
+
     modifier whenGraffitiActive() {
-        require(!graffitiEnded && !failed && !launched, "Graffiti period ended");
+        require(!graffitiEnded && !failed && !launched, "Graffiti ended");
         require(block.timestamp >= contractCreateTime, "Not started");
-        require(block.timestamp <= contractCreateTime + 4 hours, "Graffiti period expired");
+        require(block.timestamp <= contractCreateTime + 4 hours, "Graffiti expired");
         _;
     }
-    
+
     modifier whenFailed() {
-        require(failed, "Project not failed");
+        require(failed, "Not failed");
         _;
     }
-    
+
     constructor() {
         owner = msg.sender;
         contractCreateTime = block.timestamp;
     }
-    
-    // 🎨 Graffiti函数 - 用户参与涂鸦
+
+    // --- Core Functions ---
+
+    /** @dev Participate in Graffiti (mint packs) */
     function graffiti(uint256 packCount) external payable nonReentrant whenNotLaunched whenGraffitiActive {
-        require(tokenAddress != address(0), "Token not created");
-        require(packCount > 0 && packCount <= 400, "Invalid pack count 1-400");
-        
-        // 反狙击检查
+        require(tokenAddress != address(0), "Token not set");
+        require(packCount > 0 && packCount <= 400, "Invalid pack count (1-400)");
+        require(totalGraffitiPacks + packCount <= MAX_PACKS, "Exceeds max packs");
+
         _checkAntiBot(msg.sender, packCount);
-        
-        require(totalGraffitiPacks + packCount <= MAX_PACKS, "Exceeds graffiti supply");
-        
-        // 获取当前价格档位
-        (uint256 currentTier, uint256 pricePerPack) = getCurrentTier();
+
+        (, uint256 pricePerPack) = getCurrentTier();
         uint256 totalCost = packCount * pricePerPack;
-        
         require(msg.value >= totalCost, "Insufficient BNB");
-        
-        // 计算税收
-        uint256 taxAmount = totalCost * TAX_PERCENT / 10000;
+
+        // Calculate tax (2%)
+        uint256 taxAmount = (totalCost * TAX_PERCENT) / 10_000;
         uint256 netCost = totalCost - taxAmount;
-        
-        // 支付税收
+
+        // Transfer tax to TAX_ADDRESS
         if (taxAmount > 0) {
             payable(TAX_ADDRESS).transfer(taxAmount);
         }
-        
-        // 更新用户信息
+
+        // Update user data
         UserInfo storage user = users[msg.sender];
         if (user.totalPacks == 0) {
             graffitiParticipants.push(msg.sender);
         }
-        
+
         user.totalPaid += totalCost;
         user.totalPacks += packCount;
-        
-        // 计算锁定和可卖出部分 (60%锁定，40%可卖出)
-        uint256 lockedPacks = packCount * 60 / 100;
-        user.lockedPacks += lockedPacks;
-        
-        // 更新全局状态
+        user.lockedPacks += (packCount * 60) / 100; // 60% locked
         totalGraffitiPacks += packCount;
-        
-        // 退还多余BNB
+
+        // Refund excess BNB
         if (msg.value > totalCost) {
             payable(msg.sender).transfer(msg.value - totalCost);
         }
-        
+
         emit GraffitiMinted(msg.sender, packCount, pricePerPack, totalCost, taxAmount);
-        
-        // 检查是否打满自动发射
+
+        // Auto-launch if max packs reached
         if (totalGraffitiPacks >= MAX_PACKS) {
             _launch();
         }
     }
-    
-    // 💰 卖出40%代币 (不传入参数，自动卖出可卖出的40%)
+
+    /** @dev Sell 40% of unlockable packs (during Graffiti phase) */
     function sell() external nonReentrant whenNotLaunched whenGraffitiActive {
         UserInfo storage user = users[msg.sender];
         uint256 availablePacks = getSellablePacks(msg.sender);
         require(availablePacks > 0, "No packs to sell");
-        
-        // 获取当前档位和上一档价格
+
         (uint256 currentTier, uint256 currentPrice) = getCurrentTier();
-        uint256 sellPrice;
-        
-        if (currentTier == 0) {
-            // 第一档使用当前价格
-            sellPrice = currentPrice;
-        } else {
-            // 使用上一档价格
-            sellPrice = PRICE_TIERS[currentTier - 1];
-        }
-        
+        uint256 sellPrice = (currentTier == 0) ? currentPrice : PRICE_TIERS[currentTier - 1];
         uint256 refundAmount = availablePacks * sellPrice;
-        
-        // 检查合约余额
+
         require(address(this).balance >= refundAmount, "Insufficient contract balance");
-        
-        // 更新状态
+
         user.soldPacks += availablePacks;
-        
-        // 卖出的张数回到Graffiti池
-        totalGraffitiPacks -= availablePacks;
-        
-        // 支付退款
+        totalGraffitiPacks -= availablePacks; // Return packs to pool
+
         payable(msg.sender).transfer(refundAmount);
-        
         emit TokensSold(msg.sender, availablePacks, refundAmount);
     }
-    
-    // 🎯 提取代币（发射后）- 按张数计算claim的代币数
+
+    /** @dev Claim locked tokens (post-launch) */
     function claim() external nonReentrant {
-        require(launched, "Not launched yet");
-        
+        require(launched, "Not launched");
         UserInfo storage user = users[msg.sender];
         uint256 claimableTokens = user.lockedPacks * TOKENS_PER_PACK;
         require(claimableTokens > 0, "No tokens to claim");
-        
+
         user.lockedPacks = 0;
-        
         IERC20(tokenAddress).transfer(msg.sender, claimableTokens);
     }
-    
-    // 🔄 失败退款机制
+
+    /** @dev Refund BNB if project failed */
     function refund() external nonReentrant whenFailed {
         UserInfo storage user = users[msg.sender];
         require(user.totalPacks > 0, "No packs to refund");
         require(!user.hasRefunded, "Already refunded");
-        
+
         uint256 refundAmount = user.totalPacks * failedRefundPerPack;
         require(refundAmount > 0, "No refund available");
-        require(address(this).balance >= refundAmount, "Insufficient contract balance");
-        
+        require(address(this).balance >= refundAmount, "Insufficient balance");
+
         user.hasRefunded = true;
         payable(msg.sender).transfer(refundAmount);
-        
         emit Refunded(msg.sender, refundAmount);
     }
-    
-    // 🚀 发射函数
+
+    // --- Admin Functions ---
+
+    /** @dev Launch the project (create LP pool) */
     function launch() external onlyOwner whenNotLaunched {
         _launch();
     }
-    
+
     function _launch() internal {
         require(totalGraffitiPacks > 0, "No packs minted");
-        
         uint256 ethBalance = address(this).balance;
-        
-        // 转移代币到合约
+
+        // Transfer LP tokens from owner to contract
         IERC20(tokenAddress).transferFrom(owner, address(this), LP_SUPPLY);
-        
-        // 创建PancakeSwap LP池
+
+        // Approve and add liquidity
         IERC20(tokenAddress).approve(0x10ED43C718714eb63d5aA57B78B54704E256024E, LP_SUPPLY);
-        
-        (uint amountToken, uint amountETH, uint liquidity) = IUniswapV2Router(0x10ED43C718714eb63d5aA57B78B54704E256024E)
-            .addLiquidityETH{value: ethBalance}(
-                tokenAddress,
-                LP_SUPPLY,
-                LP_SUPPLY,
-                ethBalance,
-                owner,
-                block.timestamp + 1 hours
-            );
-        
+        IUniswapV2Router(0x10ED43C718714eb63d5aA57B78B54704E256024E).addLiquidityETH{value: ethBalance}(
+            tokenAddress,
+            LP_SUPPLY,
+            LP_SUPPLY,
+            ethBalance,
+            owner,
+            block.timestamp + 1 hours
+        );
+
         launched = true;
         graffitiEnded = true;
-        
-        emit Launched(amountToken, amountETH, address(this));
+        emit Launched(LP_SUPPLY, ethBalance, address(this));
     }
-    
-    // ⏰ 标记项目失败（4小时未发射）
+
+    /** @dev Mark project as failed (if not launched in 4 hours) */
     function markAsFailed() external onlyOwner {
-        require(!launched && !failed, "Already launched or failed");
+        require(!launched && !failed, "Already launched/failed");
         require(block.timestamp > contractCreateTime + 4 hours, "4 hours not passed");
-        
+
         failed = true;
         graffitiEnded = true;
-        
-        // 记录失败时数据
         failedTotalPacks = totalGraffitiPacks;
         failedTotalBNB = address(this).balance;
-        
-        // 计算每张pack的退款金额
-        if (failedTotalPacks > 0 && failedTotalBNB > 0) {
-            failedRefundPerPack = failedTotalBNB / failedTotalPacks;
-        }
-        
+        failedRefundPerPack = (failedTotalPacks > 0) ? (failedTotalBNB / failedTotalPacks) : 0;
+
         emit ProjectFailed(failedTotalPacks, failedTotalBNB, failedRefundPerPack);
     }
-    
-    // 🔒 反狙击检查
+
+    // --- Anti-Bot Checks ---
+
     function _checkAntiBot(address user, uint256 packCount) internal {
-        // 单TX限制
         require(packCount <= MAX_PACKS_PER_TX, "Exceeds max packs per TX");
-        
-        // 单地址每区块限制
+
         UserInfo storage userInfo = users[user];
-        require(block.number != userInfo.lastGraffitiBlock, "One graffiti per block per address");
+        require(block.number != userInfo.lastGraffitiBlock, "One Graffiti per block");
         userInfo.lastGraffitiBlock = block.number;
-        
-        // 单区块总限制
+
         if (block.number != lastGraffitiBlock) {
             lastGraffitiBlock = block.number;
             currentBlockPacks = 0;
@@ -300,74 +262,65 @@ contract ProofOfGraffiti is ReentrancyGuard {
         require(currentBlockPacks + packCount <= MAX_PACKS_PER_BLOCK, "Exceeds max packs per block");
         currentBlockPacks += packCount;
     }
-    
-    // 📊 读取函数
-    
-    // 获取当前档位和价格
+
+    // --- View Functions ---
+
+    /** @dev Get current price tier (0-7) and price per pack */
     function getCurrentTier() public view returns (uint256 tier, uint256 pricePerPack) {
         if (totalGraffitiPacks == 0) return (0, PRICE_TIERS[0]);
-        
-        uint256 progressPercentage = totalGraffitiPacks * 100 / MAX_PACKS;
-        
-        if (progressPercentage < 10) return (0, PRICE_TIERS[0]);
-        else if (progressPercentage < 20) return (1, PRICE_TIERS[1]);
-        else if (progressPercentage < 30) return (2, PRICE_TIERS[2]);
-        else if (progressPercentage < 40) return (3, PRICE_TIERS[3]);
-        else if (progressPercentage < 50) return (4, PRICE_TIERS[4]);
-        else if (progressPercentage < 60) return (5, PRICE_TIERS[5]);
-        else if (progressPercentage < 70) return (6, PRICE_TIERS[6]);
-        else return (7, PRICE_TIERS[7]);
+
+        uint256 progress = (totalGraffitiPacks * 100) / MAX_PACKS;
+        if (progress < 10) return (0, PRICE_TIERS[0]);
+        if (progress < 20) return (1, PRICE_TIERS[1]);
+        if (progress < 30) return (2, PRICE_TIERS[2]);
+        if (progress < 40) return (3, PRICE_TIERS[3]);
+        if (progress < 50) return (4, PRICE_TIERS[4]);
+        if (progress < 60) return (5, PRICE_TIERS[5]);
+        if (progress < 70) return (6, PRICE_TIERS[6]);
+        return (7, PRICE_TIERS[7]);
     }
-    
-    // 📈 获取地址总Graffiti张数
+
+    /** @dev Get sellable packs (40% of total, minus already sold) */
+    function getSellablePacks(address user) public view returns (uint256) {
+        UserInfo memory userInfo = users[user];
+        uint256 totalSellable = (userInfo.totalPacks * 40) / 100;
+        return (totalSellable > userInfo.soldPacks) ? (totalSellable - userInfo.soldPacks) : 0;
+    }
+
+    // --- Getters ---
+
     function getTotalPacks(address user) external view returns (uint256) {
         return users[user].totalPacks;
     }
-    
-    // 🔐 获取地址锁定张数
+
     function getLockedPacks(address user) external view returns (uint256) {
         return users[user].lockedPacks;
     }
-    
-    // 🎯 获取地址未锁定张数（可卖出）
-    function getSellablePacks(address user) public view returns (uint256) {
-        UserInfo memory userInfo = users[user];
-        uint256 totalSellable = (userInfo.totalPacks * 40 / 100);
-        if (totalSellable > userInfo.soldPacks) {
-            return totalSellable - userInfo.soldPacks;
-        }
-        return 0;
-    }
-    
-    // ⏱️ 获取合约创建时间
+
     function getContractCreateTime() external view returns (uint256) {
         return contractCreateTime;
     }
-    
-    // 📊 获取当前进度（按张数计算）
+
     function getProgress() external view returns (uint256 currentPacks, uint256 maxPacks, uint256 percentage) {
-        return (totalGraffitiPacks, MAX_PACKS, totalGraffitiPacks * 100 / MAX_PACKS);
+        return (totalGraffitiPacks, MAX_PACKS, (totalGraffitiPacks * 100) / MAX_PACKS);
     }
-    
-    // 💰 获取当前阶段价格
-    function getCurrentPrice() external view returns (uint256 pricePerPack) {
+
+    function getCurrentPrice() external view returns (uint256) {
         (, uint256 price) = getCurrentTier();
         return price;
     }
-    
-    // 🚀 获取发射状态
+
     function getLaunchStatus() external view returns (bool isLaunched, bool isFailed) {
         return (launched, failed);
     }
-    
-    // 📝 设置代币地址
+
+    /** @dev Set token address (callable once by owner) */
     function setTokenAddress(address _tokenAddress) external onlyOwner {
-        require(tokenAddress == address(0), "Token address already set");
+        require(tokenAddress == address(0), "Token already set");
+        require(_tokenAddress != address(0), "Invalid token address");
         tokenAddress = _tokenAddress;
-        
         emit GraffitiCreated(msg.sender, "Graffiti Token", "GRAFFITI", TOTAL_SUPPLY);
     }
-    
-    // 💰 接收BNB
+
     receive() external payable {}
 }
